@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import json
 import re
 import sys
+import time
 from urllib.parse import urljoin
 
 BASE_URL = "https://k.3chk.net"
@@ -35,7 +36,7 @@ def get_dubbed_series(page=1):
     return series_list
 
 def get_episodes(series_url):
-    """جلب حلقات المسلسل (جميعها أو عينة)"""
+    """جلب حلقات المسلسل (أول 5 حلقات)"""
     try:
         resp = requests.get(series_url, timeout=30, headers={'User-Agent': USER_AGENT})
         resp.raise_for_status()
@@ -46,7 +47,7 @@ def get_episodes(series_url):
     soup = BeautifulSoup(resp.text, 'html.parser')
     episodes = []
     ep_boxes = soup.find_all('a', class_='EPNumber_box')
-    for ep in ep_boxes[:5]:  # أول 5 حلقات فقط للاختبار
+    for ep in ep_boxes[:5]:
         href = ep.get('href')
         num_span = ep.find('span')
         if href and num_span:
@@ -57,7 +58,7 @@ def get_episodes(series_url):
     return episodes
 
 def extract_links_from_page(page_url):
-    """محاولة استخراج أي رابط مشغل من الصفحة بطرق متعددة"""
+    """استخراج أي رابط مشغل من الصفحة (iframe, camalk, embed)"""
     try:
         resp = requests.get(page_url, timeout=30, headers={'User-Agent': USER_AGENT})
         resp.raise_for_status()
@@ -76,20 +77,17 @@ def extract_links_from_page(page_url):
             src = urljoin(BASE_URL, src)
         return src
 
-    # 2. البحث عن روابط camalk.net في أي عنصر
-    for tag in soup.find_all(['a', 'form', 'div', 'script']):
+    # 2. البحث عن روابط camalk.net في أي عنصر (خاصة script)
+    for tag in soup.find_all(['script', 'a', 'form', 'div']):
         if tag.name == 'script' and tag.string:
-            # البحث داخل كود JavaScript
             content = tag.string
             matches = re.findall(r'(https?://camalk\.net/[^\s"\']+)', content)
             if matches:
                 return matches[0]
-            # البحث عن روابط embed
             matches = re.findall(r'(https?://k\.3chk\.net/embed/[^\s"\']+)', content)
             if matches:
                 return matches[0]
         else:
-            # البحث في النص أو السمات
             text = str(tag)
             matches = re.findall(r'(https?://camalk\.net/[^\s"\']+)', text)
             if matches:
@@ -98,7 +96,7 @@ def extract_links_from_page(page_url):
             if matches:
                 return matches[0]
 
-    # 3. البحث العام عن أي رابط يحتوي على 'embed' أو 'camalk'
+    # 3. بحث عام في HTML كله
     all_links = re.findall(r'(https?://[^\s"\']+embed[^\s"\']*)', html)
     if all_links:
         return all_links[0]
@@ -109,15 +107,16 @@ def extract_links_from_page(page_url):
     return None
 
 def follow_camalk(camalk_url):
-    """متابعة رابط camalk.net لاستخراج iframe النهائي"""
+    """متابعة رابط camalk.net للحصول على iframe النهائي أو رابط الفيديو"""
     try:
+        print(f"      ↳ متابعة {camalk_url}")
         # جلب صفحة camalk.net
         resp = requests.get(camalk_url, timeout=30, headers={'User-Agent': USER_AGENT})
         resp.raise_for_status()
         html = resp.text
         soup = BeautifulSoup(html, 'html.parser')
 
-        # البحث عن iframe داخل صفحة camalk.net
+        # 1. البحث عن iframe مباشر في صفحة camalk.net
         iframe = soup.find('iframe', src=True)
         if iframe:
             src = iframe['src']
@@ -125,7 +124,7 @@ def follow_camalk(camalk_url):
                 src = urljoin(camalk_url, src)
             return src
 
-        # البحث عن نموذج (form) وإرساله لمتابعة إعادة التوجيه
+        # 2. البحث عن نموذج (form) وإرساله لمتابعة إعادة التوجيه
         form = soup.find('form', action=True)
         if form:
             action = form['action']
@@ -133,20 +132,40 @@ def follow_camalk(camalk_url):
             data = {inp.get('name'): inp.get('value', '') for inp in inputs if inp.get('name')}
             if not action.startswith('http'):
                 action = urljoin(camalk_url, action)
+            print(f"      ↳ إرسال النموذج إلى {action}...")
             # إرسال النموذج ومتابعة إعادة التوجيه
             resp2 = requests.post(action, data=data, allow_redirects=True, timeout=30)
+            print(f"      ↳ تم التوجيه إلى {resp2.url}")
             # البحث عن iframe في الصفحة النهائية
             soup2 = BeautifulSoup(resp2.text, 'html.parser')
             iframe2 = soup2.find('iframe', src=True)
             if iframe2:
                 return iframe2['src']
-            # البحث عن روابط فيديو مباشرة
+            # البحث عن عنصر video
             video = soup2.find('video', src=True)
             if video:
                 return video['src']
+            # البحث عن روابط في script
+            scripts = soup2.find_all('script')
+            for script in scripts:
+                if script.string:
+                    match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
+                    if match:
+                        return match.group(1)
+            # إذا لم نجد شيئاً، نعيد الرابط النهائي
+            return resp2.url
+
+        # 3. البحث عن روابط في script
+        scripts = soup.find_all('script')
+        for script in scripts:
+            if script.string:
+                match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
+                if match:
+                    return match.group(1)
+
         return None
     except Exception as e:
-        print(f"⚠️ خطأ في متابعة camalk: {e}")
+        print(f"      ⚠️ خطأ في متابعة camalk: {e}")
         return None
 
 def main():
@@ -169,11 +188,12 @@ def main():
                 print(f"      ✅ تم العثور على: {link}")
                 # إذا كان الرابط من camalk.net، نتابعه
                 if 'camalk.net' in link:
-                    print(f"      ↳ متابعة camalk.net...")
                     final_link = follow_camalk(link)
                     if final_link:
                         link = final_link
                         print(f"      ✅ الرابط النهائي: {link}")
+                    else:
+                        print(f"      ⚠️ لم يتم العثور على رابط نهائي من camalk.net")
                 results[f"{series['name']} - حلقة {ep['number']}"] = link
             else:
                 print(f"      ❌ لم يتم العثور على رابط")
