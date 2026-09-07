@@ -1,0 +1,24 @@
+name: تشغيل السكربت دورياً
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # كل 6 ساعات
+  workflow_dispatch:        # يسمح بالتشغيل اليدوي من واجهة GitHub
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: سحب الكود من المستودع
+        uses: actions/checkout@v4
+
+      - name: تثبيت Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: تثبيت المتطلبات
+        run: pip install -r requirements.txt
+
+      - name: تشغيل السكربت الرئيسي
+        run: python your_script.py
