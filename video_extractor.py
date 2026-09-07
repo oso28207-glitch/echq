@@ -1,200 +1,108 @@
-import re
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import logging
-import time
-
-logger = logging.getLogger(__name__)
+import json
+import re
+import sys
+from urllib.parse import urljoin
 
 BASE_URL = "https://k.3chk.net"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-class VideoExtractor:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': USER_AGENT,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ar,en;q=0.9',
-            'Referer': BASE_URL,
-        })
+def get_dubbed_series(page=1):
+    """جلب قائمة المسلسلات المدبلجة من صفحة البحث"""
+    url = f"{BASE_URL}/search/%D9%85%D8%AF%D8%A8%D9%84%D8%AC/page/{page}/"
+    try:
+        resp = requests.get(url, timeout=30, headers={'User-Agent': USER_AGENT})
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ فشل جلب المسلسلات: {e}")
+        return []
 
-    def get_page_content(self, url):
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            logger.error(f"فشل جلب الصفحة: {e}")
-            return None
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    series_list = []
 
-    def extract_video_url(self, episode_url):
-        """الطريقة الرئيسية: استخراج رابط الفيديو من صفحة الحلقة"""
-        
-        # الخطوة 1: جلب صفحة الحلقة واستخراج رابط camalk.net
-        html = self.get_page_content(episode_url)
-        if not html:
-            return None
+    blocks = soup.find_all('div', class_='EpisodeBlock')
+    for block in blocks:
+        link = block.find('a', href=True)
+        if not link:
+            continue
+        title_tag = block.find(['h2', 'h3', 'div'], class_=re.compile(r'title|EpisodeBlockTitle'))
+        if title_tag:
+            name = title_tag.text.strip()
+            url = link['href']
+            if not url.startswith('http'):
+                url = urljoin(BASE_URL, url)
+            series_list.append({'name': name, 'url': url})
+    return series_list
 
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # البحث عن زر المشاهدة (الذي يؤدي إلى camalk.net)
-        watch_btn = soup.find('a', class_='single-go-eps', href=True)
-        if watch_btn:
-            camalk_url = watch_btn.get('href')
-            if camalk_url and 'camalk.net' in camalk_url:
-                return self._extract_from_camalk(camalk_url)
-        
-        # البحث عن iframe مباشر
-        iframe = soup.find('iframe', src=True)
-        if iframe:
-            src = iframe.get('src')
-            if src:
-                if not src.startswith('http'):
-                    src = urljoin(BASE_URL, src)
-                if 'camalk.net' in src:
-                    return self._extract_from_camalk(src)
-                return self._extract_from_iframe(src)
-        
-        # البحث عن نموذج (form) داخل الصفحة (قد يكون مخفياً)
-        form = soup.find('form', action=re.compile(r'camalk\.net'))
-        if form:
-            action = form.get('action')
-            inputs = form.find_all('input')
-            data = {inp.get('name'): inp.get('value', '') for inp in inputs if inp.get('name')}
-            if action and data:
-                return self._submit_form(action, data)
-        
+def get_episodes(series_url):
+    """جلب حلقات مسلسل معين (أول 5 حلقات فقط للاختبار)"""
+    try:
+        resp = requests.get(series_url, timeout=30, headers={'User-Agent': USER_AGENT})
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ فشل جلب حلقات المسلسل: {e}")
+        return []
+
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    episodes = []
+    ep_boxes = soup.find_all('a', class_='EPNumber_box')
+    for ep in ep_boxes[:5]:  # نأخذ أول 5 حلقات فقط لتسريع العملية
+        href = ep.get('href')
+        num_span = ep.find('span')
+        if href and num_span:
+            num = num_span.text.strip()
+            if not href.startswith('http'):
+                href = urljoin(BASE_URL, href)
+            episodes.append({'number': num, 'url': href})
+    return episodes
+
+def extract_iframe_from_episode(episode_url):
+    """استخراج رابط iframe من صفحة الحلقة"""
+    try:
+        resp = requests.get(episode_url, timeout=30, headers={'User-Agent': USER_AGENT})
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ فشل جلب صفحة الحلقة: {e}")
         return None
 
-    def _extract_from_camalk(self, camalk_url):
-        """استخراج الفيديو من صفحة camalk.net"""
-        html = self.get_page_content(camalk_url)
-        if not html:
-            return None
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    iframe = soup.find('iframe', src=True)
+    if iframe:
+        src = iframe['src']
+        if not src.startswith('http'):
+            src = urljoin(BASE_URL, src)
+        return src
+    return None
 
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # البحث عن النموذج (form) الذي يعيد التوجيه
-        form = soup.find('form', method=re.compile(r'post|get', re.I))
-        if form:
-            action = form.get('action', '')
-            inputs = form.find_all('input')
-            data = {}
-            for inp in inputs:
-                name = inp.get('name')
-                value = inp.get('value', '')
-                if name:
-                    data[name] = value
-            
-            if action and data:
-                if not action.startswith('http'):
-                    action = urljoin(camalk_url, action)
-                return self._submit_form(action, data)
-        
-        # إذا لم يكن هناك نموذج، نبحث عن iframe أو مشغل مباشر
-        iframe = soup.find('iframe', src=True)
-        if iframe:
-            src = iframe.get('src')
-            if src:
-                if not src.startswith('http'):
-                    src = urljoin(camalk_url, src)
-                return self._extract_from_iframe(src)
-        
-        # البحث عن رابط فيديو داخل script
-        scripts = soup.find_all('script')
-        for script in scripts:
-            if script.string:
-                # البحث عن روابط m3u8 أو mp4
-                match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
-                if match:
-                    return match.group(1)
-        
-        return None
+def main():
+    print("🔄 جاري جلب المسلسلات المدبلجة...")
+    series_list = get_dubbed_series(page=1)
+    if not series_list:
+        print("❌ لم يتم العثور على مسلسلات.")
+        sys.exit(1)
 
-    def _submit_form(self, action, data):
-        """إرسال نموذج ومتابعة إعادة التوجيه"""
-        try:
-            response = self.session.post(action, data=data, timeout=30, allow_redirects=True)
-            final_url = response.url
-            
-            # محاولة استخراج الفيديو من الصفحة النهائية
-            final_html = response.text
-            final_soup = BeautifulSoup(final_html, 'html.parser')
-            
-            # البحث عن iframe
-            iframe = final_soup.find('iframe', src=True)
+    results = {}
+    for idx, series in enumerate(series_list[:3], 1):  # نأخذ أول 3 مسلسلات فقط للاختبار
+        print(f"📺 {idx}. {series['name']}")
+        episodes = get_episodes(series['url'])
+        if not episodes:
+            continue
+        for ep in episodes:
+            print(f"   ↳ الحلقة {ep['number']}: جاري استخراج iframe...")
+            iframe = extract_iframe_from_episode(ep['url'])
             if iframe:
-                src = iframe.get('src')
-                if src:
-                    if not src.startswith('http'):
-                        src = urljoin(final_url, src)
-                    return self._extract_from_iframe(src)
-            
-            # البحث عن عنصر video
-            video = final_soup.find('video', src=True)
-            if video:
-                return video.get('src')
-            
-            # البحث عن روابط في script
-            scripts = final_soup.find_all('script')
-            for script in scripts:
-                if script.string:
-                    match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
-                    if match:
-                        return match.group(1)
-            
-            return final_url
-        except Exception as e:
-            logger.error(f"فشل إرسال النموذج: {e}")
-            return None
+                results[f"{series['name']} - حلقة {ep['number']}"] = iframe
+                print(f"      ✅ iframe: {iframe}")
+            else:
+                print(f"      ❌ لم يتم العثور على iframe")
 
-    def _extract_from_iframe(self, iframe_url):
-        """استخراج الفيديو من صفحة iframe"""
-        html = self.get_page_content(iframe_url)
-        if not html:
-            return None
+    # حفظ النتائج في ملف JSON
+    with open('servers.json', 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
 
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # البحث عن iframe داخل الصفحة
-        inner_iframe = soup.find('iframe', src=True)
-        if inner_iframe:
-            src = inner_iframe.get('src')
-            if src:
-                if not src.startswith('http'):
-                    src = urljoin(iframe_url, src)
-                # إذا كان الرابط لا يزال يشير إلى camalk.net، نعيد المحاولة
-                if 'camalk.net' in src:
-                    return self._extract_from_camalk(src)
-                return src
-        
-        # البحث عن عنصر video
-        video = soup.find('video', src=True)
-        if video:
-            return video.get('src')
-        
-        # البحث عن روابط في script
-        scripts = soup.find_all('script')
-        for script in scripts:
-            if script.string:
-                match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
-                if match:
-                    return match.group(1)
-        
-        return None
+    print("\n📁 تم حفظ النتائج في servers.json")
+    print(f"عدد الروابط المستخرجة: {len(results)}")
 
-
-# دالة سريعة للاستخدام
-def get_server_url(episode_url):
-    extractor = VideoExtractor()
-    return extractor.extract_video_url(episode_url)
-
-
-# مثال للاستخدام
-if __name__ == "__main__":
-    # اختبار مع حلقة حقيقية
-    test_url = "https://k.3chk.net/video/ep/mslsl-ask-ve-mavi-mudblij-season-1-episode-4/"
-    video_url = get_server_url(test_url)
-    print(f"رابط الفيديو: {video_url}")
+if __name__ == '__main__':
+    main()
