@@ -1,15 +1,15 @@
-name: تشغيل السكربت دورياً
+name: استخراج سيرفرات المشاهدة
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # كل 6 ساعات
-  workflow_dispatch:        # يسمح بالتشغيل اليدوي من واجهة GitHub
+    - cron: '0 */6 * * *'   # كل 6 ساعات
+  workflow_dispatch:        # للتشغيل اليدوي
 
 jobs:
-  run-script:
+  extract:
     runs-on: ubuntu-latest
     steps:
-      - name: سحب الكود من المستودع
+      - name: سحب الكود
         uses: actions/checkout@v4
 
       - name: تثبيت Python
@@ -20,5 +20,11 @@ jobs:
       - name: تثبيت المتطلبات
         run: pip install -r requirements.txt
 
-      - name: تشغيل السكربت الرئيسي
-        run: python your_script.py
+      - name: تشغيل سكربت الاستخراج
+        run: python extract_servers.py
+
+      - name: رفع الملف الناتج كـ Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servers-json
+          path: servers.json
