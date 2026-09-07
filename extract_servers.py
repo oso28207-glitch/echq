@@ -1,9 +1,8 @@
+import yt_dlp
+import json
 import requests
 from bs4 import BeautifulSoup
-import json
 import re
-import sys
-import time
 from urllib.parse import urljoin
 
 BASE_URL = "https://k.3chk.net"
@@ -36,7 +35,7 @@ def get_dubbed_series(page=1):
     return series_list
 
 def get_episodes(series_url):
-    """جلب حلقات المسلسل (أول 5 حلقات)"""
+    """جلب حلقات المسلسل"""
     try:
         resp = requests.get(series_url, timeout=30, headers={'User-Agent': USER_AGENT})
         resp.raise_for_status()
@@ -47,7 +46,7 @@ def get_episodes(series_url):
     soup = BeautifulSoup(resp.text, 'html.parser')
     episodes = []
     ep_boxes = soup.find_all('a', class_='EPNumber_box')
-    for ep in ep_boxes[:5]:
+    for ep in ep_boxes[:5]:  # أول 5 حلقات فقط
         href = ep.get('href')
         num_span = ep.find('span')
         if href and num_span:
@@ -57,115 +56,45 @@ def get_episodes(series_url):
             episodes.append({'number': num, 'url': href})
     return episodes
 
-def extract_links_from_page(page_url):
-    """استخراج أي رابط مشغل من الصفحة (iframe, camalk, embed)"""
+def extract_video_url_with_ytdlp(episode_url):
+    """استخدام yt-dlp لاستخراج رابط الفيديو المباشر"""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'best',
+        'extract_flat': True,
+        'user_agent': USER_AGENT,
+        'ignoreerrors': True,
+        'allow_unplayable_formats': True,
+    }
     try:
-        resp = requests.get(page_url, timeout=30, headers={'User-Agent': USER_AGENT})
-        resp.raise_for_status()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(episode_url, download=False)
+            if not info:
+                return None
+            # استخراج الرابط المباشر
+            video_url = info.get('url')
+            if video_url:
+                return video_url
+            # محاولة من التنسيقات
+            formats = info.get('formats', [])
+            if formats:
+                best = max(formats, key=lambda x: x.get('height', 0) or 0)
+                return best.get('url')
+            # محاولة من الإدخالات (للتشغيل)
+            entries = info.get('entries', [])
+            if entries:
+                entry = entries[0]
+                video_url = entry.get('url')
+                if video_url:
+                    return video_url
+                formats = entry.get('formats', [])
+                if formats:
+                    best = max(formats, key=lambda x: x.get('height', 0) or 0)
+                    return best.get('url')
+            return None
     except Exception as e:
-        print(f"❌ فشل جلب الصفحة: {e}")
-        return None
-
-    html = resp.text
-    soup = BeautifulSoup(html, 'html.parser')
-
-    # 1. البحث عن iframe
-    iframe = soup.find('iframe', src=True)
-    if iframe:
-        src = iframe['src']
-        if not src.startswith('http'):
-            src = urljoin(BASE_URL, src)
-        return src
-
-    # 2. البحث عن روابط camalk.net في أي عنصر (خاصة script)
-    for tag in soup.find_all(['script', 'a', 'form', 'div']):
-        if tag.name == 'script' and tag.string:
-            content = tag.string
-            matches = re.findall(r'(https?://camalk\.net/[^\s"\']+)', content)
-            if matches:
-                return matches[0]
-            matches = re.findall(r'(https?://k\.3chk\.net/embed/[^\s"\']+)', content)
-            if matches:
-                return matches[0]
-        else:
-            text = str(tag)
-            matches = re.findall(r'(https?://camalk\.net/[^\s"\']+)', text)
-            if matches:
-                return matches[0]
-            matches = re.findall(r'(https?://k\.3chk\.net/embed/[^\s"\']+)', text)
-            if matches:
-                return matches[0]
-
-    # 3. بحث عام في HTML كله
-    all_links = re.findall(r'(https?://[^\s"\']+embed[^\s"\']*)', html)
-    if all_links:
-        return all_links[0]
-    all_links = re.findall(r'(https?://camalk\.net[^\s"\']+)', html)
-    if all_links:
-        return all_links[0]
-
-    return None
-
-def follow_camalk(camalk_url):
-    """متابعة رابط camalk.net للحصول على iframe النهائي أو رابط الفيديو"""
-    try:
-        print(f"      ↳ متابعة {camalk_url}")
-        # جلب صفحة camalk.net
-        resp = requests.get(camalk_url, timeout=30, headers={'User-Agent': USER_AGENT})
-        resp.raise_for_status()
-        html = resp.text
-        soup = BeautifulSoup(html, 'html.parser')
-
-        # 1. البحث عن iframe مباشر في صفحة camalk.net
-        iframe = soup.find('iframe', src=True)
-        if iframe:
-            src = iframe['src']
-            if not src.startswith('http'):
-                src = urljoin(camalk_url, src)
-            return src
-
-        # 2. البحث عن نموذج (form) وإرساله لمتابعة إعادة التوجيه
-        form = soup.find('form', action=True)
-        if form:
-            action = form['action']
-            inputs = form.find_all('input')
-            data = {inp.get('name'): inp.get('value', '') for inp in inputs if inp.get('name')}
-            if not action.startswith('http'):
-                action = urljoin(camalk_url, action)
-            print(f"      ↳ إرسال النموذج إلى {action}...")
-            # إرسال النموذج ومتابعة إعادة التوجيه
-            resp2 = requests.post(action, data=data, allow_redirects=True, timeout=30)
-            print(f"      ↳ تم التوجيه إلى {resp2.url}")
-            # البحث عن iframe في الصفحة النهائية
-            soup2 = BeautifulSoup(resp2.text, 'html.parser')
-            iframe2 = soup2.find('iframe', src=True)
-            if iframe2:
-                return iframe2['src']
-            # البحث عن عنصر video
-            video = soup2.find('video', src=True)
-            if video:
-                return video['src']
-            # البحث عن روابط في script
-            scripts = soup2.find_all('script')
-            for script in scripts:
-                if script.string:
-                    match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
-                    if match:
-                        return match.group(1)
-            # إذا لم نجد شيئاً، نعيد الرابط النهائي
-            return resp2.url
-
-        # 3. البحث عن روابط في script
-        scripts = soup.find_all('script')
-        for script in scripts:
-            if script.string:
-                match = re.search(r'(https?://[^\s"\']+\.(?:m3u8|mp4|mkv|webm)[^\s"\']*)', script.string)
-                if match:
-                    return match.group(1)
-
-        return None
-    except Exception as e:
-        print(f"      ⚠️ خطأ في متابعة camalk: {e}")
+        print(f"⚠️ yt-dlp error: {e}")
         return None
 
 def main():
@@ -173,7 +102,7 @@ def main():
     series_list = get_dubbed_series(page=1)
     if not series_list:
         print("❌ لم يتم العثور على مسلسلات.")
-        sys.exit(1)
+        return
 
     results = {}
     for idx, series in enumerate(series_list[:3], 1):
@@ -182,23 +111,14 @@ def main():
         if not episodes:
             continue
         for ep in episodes:
-            print(f"   ↳ الحلقة {ep['number']}: جاري البحث عن الرابط...")
-            link = extract_links_from_page(ep['url'])
-            if link:
-                print(f"      ✅ تم العثور على: {link}")
-                # إذا كان الرابط من camalk.net، نتابعه
-                if 'camalk.net' in link:
-                    final_link = follow_camalk(link)
-                    if final_link:
-                        link = final_link
-                        print(f"      ✅ الرابط النهائي: {link}")
-                    else:
-                        print(f"      ⚠️ لم يتم العثور على رابط نهائي من camalk.net")
-                results[f"{series['name']} - حلقة {ep['number']}"] = link
+            print(f"   ↳ الحلقة {ep['number']}: جاري استخراج الرابط باستخدام yt-dlp...")
+            video_url = extract_video_url_with_ytdlp(ep['url'])
+            if video_url:
+                print(f"      ✅ الرابط: {video_url}")
+                results[f"{series['name']} - حلقة {ep['number']}"] = video_url
             else:
                 print(f"      ❌ لم يتم العثور على رابط")
 
-    # حفظ النتائج
     with open('servers.json', 'w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
